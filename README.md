@@ -1,243 +1,224 @@
-# NewArt_X Auctions Service
+# NewArtX Auctions Service
 
 A single-endpoint auction bidding service built with Node.js + TypeScript, Express, and MySQL 8.
 Assignment ID: `v#hdf38%44`
+See my thought process [here](#thought-process).
 
 ---
 
-## Table of Contents
-
-1. [Quick Start](#quick-start)
-2. [Prerequisites](#prerequisites)
-3. [Local Development](#local-development)
-4. [API Endpoints](#api-endpoints)
-5. [Design Mechanisms](#design-mechanisms)
-6. [Manual Verification](#manual-verification)
-7. [Testing Scenarios](#testing-scenarios)
-
----
-
-## Quick Start
+## Quick start
 
 ```bash
-docker-compose up --build     # starts mysql + app, runs init.sql on first boot
-npm run dev                   # local dev against dockerized mysql
+docker compose up --build
 ```
+
+This starts both the MySQL container and the app container. The app listens on `http://localhost:3000`.
 
 ---
 
 ## Prerequisites
 
-- [Docker](https://www.docker.com/) & [Docker Compose](https://docs.docker.com/compose/)
-- [Node.js](https://nodejs.org/) (>=20) and [pnpm](https://pnpm.io/) or npm
-- `mysql8` service defined in `docker-compose.yml`
+- Docker + Docker Compose
+- Node.js 20+
+- npm
 
 ---
 
-## Local Development
+## Local development
 
-1. **Start infrastructure**
+1. Install dependencies:
 
-   ```bash
-   docker-compose up -d
-   ```
+```bash
+npm install
+```
 
-   This brings up:
-   - `mysql` service (MySQL 8)
-   - `app` service (Node/TS server)
+2. Create `.env` file
+   Copy the content from `.env.dist` file and paste it into the `.env`. You need to create `.env` first.
 
-2. **Install dependencies**
+3. Start the containers:
 
-   ```bash
-   pnpm install       # or npm install
-   ```
+```bash
+docker compose up -d --build
+```
 
-3. **Run migrations / init DB** (happens automatically on first `docker-compose up` via `init.sql`)
+4. Start the app locally against the Dockerized MySQL instance:
 
-4. **Start the server**
+```bash
+npm run dev
+```
 
-   ```bash
-   npm run dev        # watches ts files, restarts on change, connects to docker mysql
-   ```
-
-   The server listens on `http://localhost:3000`.
-
-5. **Verify** (example curl)
-
-   ```bash
-   curl -X POST localhost:3000/bid -d '{"auction_id":1,"user_id":1,"amount":100}' -H 'Content-Type: application/json'
-   ```
+5. Verify with `curl` against the running server (OpenAPI spec can be found at `/openapi.yaml`. Also, manual verifiction scenarios provided below.)
 
 ---
 
-## API Endpoints
+## API surface
 
-| Method | Path            | Request Body                      | Description                                     |
-| ------ | --------------- | --------------------------------- | ----------------------------------------------- |
-| `POST` | `/bid`          | `{ auction_id, user_id, amount }` | Place a bid (idempotent)                        |
-| `GET`  | `/auctions/:id` | —                                 | Read‑only auction details (manual verification) |
+| Method | Path            | Request body                                       | Notes                                                       |
+| ------ | --------------- | -------------------------------------------------- | ----------------------------------------------------------- |
+| `POST` | `/bid`          | `{ auction_id, user_id, amount, idempotency_key }` | Creates or reuses a bid result for the same logical request |
+| `GET`  | `/auctions/:id` | NA                                                 | For testing purposes only                                   |
+
+### Supported request fields
+
+- `auction_id`: auction identifier
+- `user_id`: trusted client value for this assignment
+- `amount`: bid amount
+- `idempotency_key`: unique per retry; required to deduplicate duplicate requests
+
+### Success and failure behavior
+
+- `200` on accepted bid
+- `200` on duplicate/retried request that matches the same `(auction_id, user_id, idempotency_key)` combination
+- `400` when required fields are missing
+- `404` when the auction does not exist
+- `409` when the auction is closed or the bid is too low
+- `500` for unexpected internal failures
 
 ---
 
-## Design Mechanisms
+## Design choices
 
-### 1. Top‑bid correctness (single source of truth)
+### 1. Single source of truth for the top bid
 
-- `auctions.current_top_amount` and `current_top_bid_id` are updated **only** inside the same transaction that inserts the winning bid.
-- No separate `MAX()` queries elsewhere – eliminates race‑condition ambiguity.
+The auction row stores:
 
-### 2. Concurrency control (`SELECT ... FOR UPDATE`)
+- `current_top_bid_id`
+- `current_top_amount`
 
-- Inside a MySQL transaction, the auction row is locked with `SELECT ... FOR UPDATE` before checking/updating the top bid.
-- This is the **explicit** chosen mechanism (see `plan.md` for the reasoning). Do not swap for Redis, optimistic version columns, or application‑level locking.
+Those values are updated only inside the same transaction that inserts the winning bid. This avoids ambiguity that would appear if the service tried to compute the top bid later with a separate `MAX()` query.
+
+### 2. Concurrency control
+
+The implementation uses `SELECT ... FOR UPDATE` inside a MySQL transaction before checking whether the bid is valid. This blocks concurrent writes on the same auction row until the transaction completes.
 
 ### 3. Idempotency
 
-- Unique constraint on `(auction_id, user_id, idempotency_key)` in the `bids` table.
-- A conflicting insert returns the existing bid’s result instead of erroring.
+The `bids` table has a unique constraint on:
 
-### 4. No Redis / no message queue
-
-- Explicitly rejected for this scope. All state lives in MySQL within the transaction.
-
-### 5. Auth absent
-
-- `user_id` is trusted from the request body. No auth middleware.
-
----
-
-## Manual Verification (four scenarios)
-
-Run these with `curl` after the server is up:
-
-| Scenario                               | Curl Command                                                                                                         | Expected Outcome                                                                                                                     |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| **Happy path** – valid new bid         | `curl -X POST localhost:3000/bid -d '{"auction_id":1,"user_id":1,"amount":150}' -H 'Content-Type: application/json'` | `201 Created`, bid stored, `current_top_amount` updated to 150.                                                                      |
-| **Bid too low**                        | `curl -X POST localhost:3000/bid -d '{"auction_id":1,"user_id":1,"amount":50}' -H 'Content-Type: application/json'`  | `400 Bad Request` (or appropriate error), bid rejected because `amount <= current_top_amount`.                                       |
-| **Duplicate/retried bid** (idempotent) | `curl -X POST localhost:3000/bid -d '{"auction_id":1,"user_id":1,"amount":200}' -H 'Content-Type: application/json'` | Returns the **existing** bid result (201 or 400 depending on prior state). No duplicate row; idempotency key prevents re‑processing. |
-| **Bid after close**                    | First close the auction (e.g., update `auctions.closed_at`), then attempt a bid.                                     | `403 Forbidden` (or appropriate error), bid rejected because auction is closed.                                                      |
-
----
-
-## Testing Scenarios (manual, per assignment)
-
-- **Happy path** – successful bid, top‑bid updates correctly.
-- **Bid too low** – server rejects amount ≤ current top.
-- **Duplicate/retried bid** – same idempotency key returns existing result; no error, no duplicate.
-- **Bid after close** – auction closed → bid rejected.
-
-> **Do not add a test framework (Jest, etc.)** – the assignment expects only manual curl verification within the 90‑minute budget.
-
----
-
-## Project Structure (high‑level)
-
-```
-├─ docker-compose.yml          # mysql + app services
-├─ init.sql                   # DB schema + seed data (run once)
-├─ src/
-│  ├─ server.ts               # Express entry point
-│  ├─ routes/
-│  │   └─ bid.ts              # POST /bid handler
-│  └─ db/
-│     └─ queries.sql          # raw SQL (SELECT ... FOR UPDATE, INSERT, etc.)
-├─ .env                       # DB connection, port, etc.
-├─ tsconfig.json
-└─ README.md                  # this file
+```sql
+(auction_id, user_id, idempotency_key)
 ```
 
+If a duplicate request arrives, the app catches the duplicate-key error and looks up the original bid row, returning its prior result instead of failing.
+
 ---
 
-## How Concurrency Works (single function)
+## Manual verification scenarios
+
+After the server is running, test the four required scenarios using `curl`.
+
+Use a real auction ID from the seeded data or from a read query against `/auctions/:id`.
+
+```bash
+# Happy path
+curl -X POST http://localhost:3000/bid \
+  -H 'Content-Type: application/json' \
+  -d '{"auction_id":"<auction-id>","user_id":"user-1","amount":650,"idempotency_key":"bid-1"}'
+
+# Bid too low
+curl -X POST http://localhost:3000/bid \
+  -H 'Content-Type: application/json' \
+  -d '{"auction_id":"<auction-id>","user_id":"user-2","amount":500,"idempotency_key":"bid-2"}'
+
+# Duplicate/retried bid
+curl -X POST http://localhost:3000/bid \
+  -H 'Content-Type: application/json' \
+  -d '{"auction_id":"<auction-id>","user_id":"user-1","amount":650,"idempotency_key":"bid-1"}'
+
+# Bid after close
+curl -X POST http://localhost:3000/bid \
+  -H 'Content-Type: application/json' \
+  -d '{"auction_id":"<auction-id>","user_id":"user-3","amount":900,"idempotency_key":"bid-3"}'
+```
+
+Expected outcomes:
+
+- successful bid: `200` with `{ bid_id, auction_id, amount, status: "accepted" }`
+- low bid: `409` with `{ error: "bid too low" }`
+- duplicate request: `200` with the original bid result
+- closed auction: `409` with `{ error: "auction closed" }`
+
+---
+
+## Concurrency flow in one place
+
+The bid placement logic is intentionally kept as a single transaction in a single async function:
 
 ```ts
-// src/routes/bid.ts  (simplified)
-async function placeBid(req, res) {
-  const { auction_id, user_id, amount, idempotency_key } = req.body;
+await connection.beginTransaction();
 
-  const connection = await pool.getConnection();
-  await connection.beginTransaction();
+const [rows] = await connection.execute(
+  "SELECT * FROM auctions WHERE id = ? FOR UPDATE",
+  [auction_id],
+);
 
-  try {
-    // 1. Lock the auction row
-    const [auctions] = await connection.execute<
-      Array<{ current_top_amount: number }>
-    >("SELECT current_top_amount FROM auctions WHERE id = ? FOR UPDATE", [
-      auction_id,
-    ]);
-
-    const top = auctions[0]?.current_top_amount ?? 0;
-
-    // 2. Validate amount > top
-    if (amount <= top) {
-      await connection.rollback();
-      return res.status(400).json({ error: "Bid too low" });
-    }
-
-    // 3. Insert bid (idempotency via unique constraint)
-    await connection.execute(
-      "INSERT INTO bids (auction_id, user_id, amount, idempotency_key) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE amount = VALUES(amount)",
-      [auction_id, user_id, amount, idempotency_key],
-    );
-
-    // 4. Update top‑bid fields inside same transaction
-    await connection.execute(
-      "UPDATE auctions SET current_top_amount = ?, current_top_bid_id = ? WHERE id = ?",
-      [amount, result.insertId, auction_id],
-    );
-
-    await connection.commit();
-    res.status(201).json({ top_amount: amount, bid_id: result.insertId });
-  } catch (err) {
-    await connection.rollback();
-    res.status(500).json({ error: "Internal error" });
-  } finally {
-    connection.release();
-  }
+if (rows.length === 0) {
+  await connection.rollback();
+  return res.status(404).json({ error: "auction not found" });
 }
+
+const auction = rows[0];
+
+if (new Date() >= auction.closes_at || auction.status === "closed") {
+  await connection.rollback();
+  return res.status(409).json({ error: "auction closed" });
+}
+
+const effectiveFloor = auction.current_top_amount ?? auction.starting_bid;
+
+if (amount <= effectiveFloor) {
+  await connection.rollback();
+  return res.status(409).json({ error: "bid too low" });
+}
+
+await connection.execute(
+  "INSERT INTO bids (id, auction_id, user_id, amount, idempotency_key) VALUES (?, ?, ?, ?, ?)",
+  [bid_id, auction_id, user_id, amount, idempotency_key],
+);
+
+await connection.execute(
+  "UPDATE auctions SET current_top_bid_id = ?, current_top_amount = ? WHERE id = ?",
+  [bid_id, amount, auction_id],
+);
+
+await connection.commit();
 ```
 
-- The function is **linear** – a single transaction from lock → validate → insert → update → commit.
-- No helper spread‑across‑files; a reviewer can read the whole race‑condition handling in one place.
+This preserves correctness and makes the race-condition handling easy to review.
 
----
+## Thought Process
 
-## How Idempotency Works
+### Data model
 
-- The `bids` table has a **unique index** on `(auction_id, user_id, idempotency_key)`.
-- The INSERT statement uses `ON DUPLICATE KEY UPDATE amount = VALUES(amount)`.
-- If a duplicate key occurs, MySQL updates the existing row and returns the **existing** bid result (the function sees `result.affectedRows === 0` and can return the prior bid’s data).
-- Application never throws on conflict – it simply returns the prior outcome.
+There are two tables: `bids` and `auctions`. The models can be found at `init.sql`.
 
----
+1. The `bids` table stores records of each accepted bid, whereas `auctions` store data of all the auctions. There's no endpoint to add new autions so only two auctions from `init.sql` are considered.
+2. The `current_top_bid_id` and `current_top_amount` columns in the `auctions` table help find the current top bid easy and cheap.
+3. Top bid fields are are stored in the `auctions` table instead of deriving them with `max(amount)` because the bid insert and top-bid update happen together in one transaction while the auction row is locked. This gives us serialized decision point and returns current top bid unambigously.
+4. I've also added a unique constraint on auction_id + user_id + idempotency_key so that same request dont add data in the db.
 
-## How Close‑Boundary Handling Works
+### Auction-close boundary
 
-- The `auctions` table has a `closed_at` column (`DATETIME`).
-- Before any bid validation, the handler checks `if (auction.closed_at && new Date() >= auction.closed_at)` and returns `403 Forbidden`.
-- This check occurs **inside** the same `SELECT ... FOR UPDATE` transaction, so the close boundary cannot be raced past.
+A bid is rejected when `now > closes_at`, OR when the auction status is already `closed`. The check happens after `SELECT ... FOR UPDATE`, so a request that has waited behind another bid evaluates the auction after it acquires the lock. The current route uses the Node process clock for `now`; for production, I would use the database clock consistently with `NOW(3)` to avoid disagreement between application and database clocks.
 
----
+The auction status remains open even after `closed_at` time is passed. This is because we dont have any active mechanism that checks this at certain intervals (say each minute) and toggles the status.
 
-## Environment Variables (`.env`)
+### Placing a bid
 
-```env
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=
-DB_NAME=newartx_auctions
-PORT=3000
-```
+Here's what happens when a new bid is placed via the `POST /bid` API:
 
----
+1. Start the transaction and lock the target auction row.
+2. Return not found if no auction exists, reject closed auctions or auctions with less/same price than starting bid / current top amount.
+3. Insert the bid, update auction's top bid and amount and commit transaction.
+4. If any other request for the same auction is triggered then it has to wait until it can acquire the lock. After acquiring the lock, step 1-3 are repeated.
+5. A duplicate idempotency key returns the existing bid result rather than creating another bid.
 
-## Known Limitations / Underspecified Items (Yet to answer)
+### Bidding on your own top bid
 
-- **Self‑bid decision** – whether a user may bid on their own auction is left unspecified; the current implementation simply trusts the `user_id` from the request.
-- **Underspecified boundary conditions** – e.g., what happens when two bids with the _exact same amount_ arrive concurrently. The current logic (`amount <= top`) treats equal amounts as "too low"; you may adjust per your own rule.
-- **Data‑model rationale** – you'll document why `current_top_amount`/`current_top_bid_id` are the single source of truth rather than a separate `MAX()` query.
-- **Close‑boundary handling** – you may decide whether a bid placed at the exact close moment should be accepted or rejected.
-- **Duplicate‑bid handling edge cases** – e.g., what if the idempotency key is omitted? (Currently the column allows `NULL` and the unique constraint does not cover it; you may add a default generated key.)
+If the new amount is higher than the current top bid, the bid is accepted regardless if the current top bidder is doing it again. The assignment description doesn't prohibit self outbidding. Hence the implementation permits it.
 
----
+### Other concerns
+
+1. No mechanism to switch status to close once `now > closes_at` becomes true.
+2. The idempotency check currently happens after the auction-close and minimum-bid checks. This means a retry of an accepted bid can be rejected as “bid too low” because that bid is now the current top bid. A retry after the auction closes can also be rejected as `auction closed`. I would check for the existing auction_id +user_id + idempotency_key near the start of the transaction and return the stored result before applying the current auction rules. I would also verify that the retry has the same amount as the original request, and return a conflict if the same key is reused with a different amount.
+3. Not mentioning auth, rate limiting, etc because they werent part of the scope.

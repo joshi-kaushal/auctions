@@ -1,0 +1,146 @@
+openapi: 3.0.3
+info:
+  title: Auction Bidding Service
+  version: 1.0.0
+  description: |
+    A single-endpoint auction bidding service for NewArtX / Elephant Canvas LLP.
+    Accepts POST /bid with { auction_id, user_id, amount }.
+    Optionally GET /auctions/{id} for read-only verification.
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+paths:
+  /bid:
+    post:
+      summary: Place a bid on an auction
+      operationId: placeBid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - auction_id
+                - user_id
+                - amount
+                - idempotency_key
+              properties:
+                auction_id:
+                  type: string
+                  description: The auction identifier (UUID)
+                user_id:
+                  type: string
+                  description: The user identifier (UUID)
+                amount:
+                  type: number
+                  description: The bid amount
+                idempotency_key:
+                  type: string
+                  description: Client-generated unique key to make duplicate retries idempotent
+      responses:
+        "200":
+          description: Bid accepted or retried duplicate idempotent request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bid_id:
+                    type: string
+                    description: The created or previously stored bid ID
+                  auction_id:
+                    type: string
+                    description: The auction ID
+                  amount:
+                    type: number
+                    description: The accepted bid amount
+                  status:
+                    type: string
+                    enum: [accepted]
+                    description: Status of the bid
+        "400":
+          description: Bad request - missing required fields
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    description: Error message
+        "404":
+          description: Auction not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    description: Error message
+        "409":
+          description: Bid rejected due to auction closure or a non-competitive bid
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      error:
+                        type: string
+                        enum: [auction closed]
+                  - type: object
+                    properties:
+                      error:
+                        type: string
+                        enum: [bid too low]
+  /auctions/{id}:
+    get:
+      summary: Retrieve auction by ID (read-only, verification only)
+      operationId: getAuction
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The auction identifier
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Auction details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  title:
+                    type: string
+                  starting_bid:
+                    type: number
+                  current_top_amount:
+                    type: number
+                    nullable: true
+                  current_top_bid_id:
+                    type: string
+                    format: uuid
+                    nullable: true
+                  closes_at:
+                    type: string
+                    format: date-time
+                  status:
+                    type: string
+        "404":
+          description: Auction not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    description: Error message

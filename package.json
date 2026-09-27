@@ -1,0 +1,37 @@
+{
+  "name": "newartx_auctions",
+  "version": "1.0.0",
+  "description": "Auction bidding API",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "echo \"No automated tests configured for this assignment\""
+  },
+  "keywords": [
+    "auction",
+    "typescript",
+    "express",
+    "mysql"
+  ],
+  "author": "",
+  "license": "ISC",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1",
+    "mysql2": "^3.24.4",
+    "uuid": "^14.0.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
